@@ -10,9 +10,9 @@ type Pool struct {
 	Dial        func() (*Client, error)
 	MaxActive   int
 	IdleTimeout time.Duration
-	mu          sync.Mutex
+	mutex       sync.Mutex
 	idle        []*idleConnection
-	active      int
+	Active      int
 	cond        *sync.Cond
 }
 
@@ -30,10 +30,10 @@ type idleConnection struct {
 
 // Get will return an available pooled connection. Either an idle connection or
 // by dialing a new one if the pool does not currently have a maximum number
-// of active connections.
+// of Active connections.
 func (p *Pool) Get() (*PooledConnection, error) {
 	// Lock the pool to keep the kids out.
-	p.mu.Lock()
+	p.mutex.Lock()
 
 	// Clean this place up.
 	p.purge()
@@ -45,27 +45,27 @@ func (p *Pool) Get() (*PooledConnection, error) {
 
 			// Remove the connection from the idle slice
 			p.idle = append(p.idle[:0], p.idle[1:]...)
-			p.active++
-			p.mu.Unlock()
+			p.Active++
+			p.mutex.Unlock()
 			pc := &PooledConnection{Pool: p, Client: conn.pc.Client}
 			return pc, nil
 
 		}
 
 		// No idle connections, try dialing a new one
-		if p.MaxActive == 0 || p.active < p.MaxActive {
-			p.active++
+		if p.MaxActive == 0 || p.Active < p.MaxActive {
+			p.Active++
 			dial := p.Dial
 
 			// Unlock here so that any other connections that need to be
 			// dialed do not have to wait.
-			p.mu.Unlock()
+			p.mutex.Unlock()
 
 			dc, err := dial()
 			if err != nil {
-				p.mu.Lock()
+				p.mutex.Lock()
 				p.release()
-				p.mu.Unlock()
+				p.mutex.Unlock()
 				return nil, err
 			}
 
@@ -73,9 +73,9 @@ func (p *Pool) Get() (*PooledConnection, error) {
 			return pc, nil
 		}
 
-		//No idle connections and max active connections, let's wait.
+		//No idle connections and max Active connections, let's wait.
 		if p.cond == nil {
-			p.cond = sync.NewCond(&p.mu)
+			p.cond = sync.NewCond(&p.mutex)
 		}
 
 		p.cond.Wait()
@@ -114,10 +114,10 @@ func (p *Pool) purge() {
 	}
 }
 
-// release decrements active and alerts waiters.
+// release decrements Active and alerts waiters.
 // It is not threadsafe. The caller should manage locking the pool.
 func (p *Pool) release() {
-	p.active--
+	p.Active--
 	if p.cond != nil {
 		p.cond.Signal()
 	}
@@ -134,9 +134,19 @@ func (p *Pool) first() *idleConnection {
 // Close signals that the caller is finished with the connection and should be
 // returned to the pool for future use.
 func (pc *PooledConnection) Close() {
-	pc.Pool.mu.Lock()
-	defer pc.Pool.mu.Unlock()
+	pc.Pool.mutex.Lock()
+	defer pc.Pool.mutex.Unlock()
 
 	pc.Pool.put(pc)
 	pc.Pool.release()
+}
+
+func CreatePool(dialer func() (*Client, error), timeout time.Duration) *Pool {
+	pool := Pool{
+		IdleTimeout: timeout,
+		Dial:        dialer,
+		MaxActive:   10,
+		mutex:       sync.Mutex{},
+	}
+	return &pool
 }
